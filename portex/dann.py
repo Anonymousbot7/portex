@@ -127,6 +127,60 @@ def _train_worker(kwargs: dict) -> tuple[int, dict, dict]:
 
 
 # -----------------------------------------------------------------------
+# Worker function — trains one base NN (MSE only) for one E dimension
+# -----------------------------------------------------------------------
+
+def _train_base_worker(kwargs: dict) -> tuple[int, dict, dict]:
+    """
+    Train one base NN (MSE only, no domain adaptation) for one E dimension.
+    Returns (g, F_state_dict, P_state_dict).
+    """
+    g             = kwargs["g"]
+    Z_source      = kwargs["Z_source"]
+    E_source_col  = kwargs["E_source_col"]
+    input_dim     = kwargs["input_dim"]
+    latent_dim    = kwargs["latent_dim"]
+    hidden_dim_F  = kwargs["hidden_dim_F"]
+    hidden_dim_DP = kwargs["hidden_dim_DP"]
+    epochs        = kwargs["epochs"]
+    lr            = kwargs["lr"]
+    weight_decay  = kwargs["weight_decay"]
+    clip_grad_norm= kwargs["clip_grad_norm"]
+    seed          = kwargs["seed"]
+    verbose       = kwargs["verbose"]
+
+    torch.manual_seed(seed)
+
+    Zs = torch.tensor(Z_source,     dtype=torch.float32, device=DEVICE)
+    Es = torch.tensor(E_source_col, dtype=torch.float32, device=DEVICE).view(-1, 1)
+
+    F_net = FeatureExtractor(input_dim, hidden_dim_F, latent_dim).to(DEVICE)
+    P_net = Predictor(latent_dim, hidden_dim_DP, output_dim=1).to(DEVICE)
+
+    crit = nn.MSELoss()
+    opt  = torch.optim.Adam(
+        list(F_net.parameters()) + list(P_net.parameters()),
+        lr=lr, weight_decay=weight_decay,
+    )
+
+    for epoch in range(epochs):
+        loss = crit(P_net(F_net(Zs)), Es)
+        opt.zero_grad()
+        loss.backward()
+        if clip_grad_norm is not None:
+            nn.utils.clip_grad_norm_(
+                list(F_net.parameters()) + list(P_net.parameters()),
+                max_norm=clip_grad_norm,
+            )
+        opt.step()
+
+        if verbose and (epoch + 1) % 100 == 0:
+            print(f"  [base dim {g}] epoch {epoch+1}/{epochs}  mse={loss.item():.4f}")
+
+    return g, F_net.state_dict(), P_net.state_dict()
+
+
+# -----------------------------------------------------------------------
 # Public class
 # -----------------------------------------------------------------------
 
@@ -199,6 +253,8 @@ class DANN:
 
         self._F_states: list[dict] = []
         self._P_states: list[dict] = []
+        self._F_base_states: list[dict] = []
+        self._P_base_states: list[dict] = []
         self._G: int | None = None
         self._multidim: bool = False
 
@@ -321,7 +377,7 @@ class DANN:
 
     def mse(self, Z: np.ndarray, E_true: np.ndarray) -> float | np.ndarray:
         """
-        MSE between predictions and true E.
+        MSE between DANN predictions and true E.
 
         Returns
         -------
@@ -333,6 +389,146 @@ class DANN:
         if not self._multidim:
             return float(np.mean((E_hat - E_true.ravel()) ** 2))
         return np.mean((E_hat - E_true) ** 2, axis=0)  # (G,)
+
+    # ------------------------------------------------------------------
+    # fit_base / predict_base / mse_base
+    # ------------------------------------------------------------------
+
+    def fit_base(
+        self,
+        Z_source: np.ndarray,
+        E_source: np.ndarray,
+        epochs: int | None = None,
+        verbose: bool = False,
+    ) -> "DANN":
+        """
+        Train a baseline NN (MSE only, no domain adaptation) on source data.
+
+        Uses the same F+P architecture and hyperparameters as DANN.
+        No Z_target is needed.
+
+        Parameters
+        ----------
+        Z_source : (N_s, d)
+        E_source : (N_s,) or (N_s, G)
+        epochs   : training epochs; defaults to self.epochs if None
+        verbose  : print loss every 100 epochs if True
+
+        Returns
+        -------
+        self
+        """
+        Z_source = np.asarray(Z_source, dtype=np.float32)
+        E_source = np.asarray(E_source, dtype=np.float32)
+        if Z_source.ndim != 2:
+            raise ValueError(f"Z_source must be 2-D, got {Z_source.shape}")
+        if Z_source.shape[1] != self.input_dim:
+            raise ValueError(
+                f"Z has {Z_source.shape[1]} features but DANN was built with "
+                f"input_dim={self.input_dim}"
+            )
+        if E_source.ndim == 1:
+            E_source = E_source[:, None]
+            self._multidim = False
+        elif E_source.ndim == 2:
+            self._multidim = True
+        else:
+            raise ValueError(f"E_source must be 1-D or 2-D, got {E_source.shape}")
+        if E_source.shape[0] != Z_source.shape[0]:
+            raise ValueError(
+                f"E_source has {E_source.shape[0]} rows but Z_source has {Z_source.shape[0]}"
+            )
+        n_epochs = self.epochs if epochs is None else epochs
+        G = E_source.shape[1]
+        self._G = G
+
+        jobs = [
+            dict(
+                g=g,
+                Z_source=Z_source,
+                E_source_col=E_source[:, g],
+                input_dim=self.input_dim,
+                latent_dim=self.latent_dim,
+                hidden_dim_F=self.hidden_dim_F,
+                hidden_dim_DP=self.hidden_dim_DP,
+                epochs=n_epochs,
+                lr=self.lr,
+                weight_decay=self.weight_decay,
+                clip_grad_norm=self.clip_grad_norm,
+                seed=self.seed_base + g,
+                verbose=verbose,
+            )
+            for g in range(G)
+        ]
+
+        n_workers = self._resolve_n_jobs(G)
+        self._F_base_states = [None] * G
+        self._P_base_states = [None] * G
+
+        if n_workers == 1:
+            for job in jobs:
+                g, fs, ps = _train_base_worker(job)
+                self._F_base_states[g] = fs
+                self._P_base_states[g] = ps
+                if verbose:
+                    print(f"[Base] dim {g+1}/{G} done")
+        else:
+            if verbose:
+                print(f"[Base] training {G} dims with {n_workers} threads")
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_train_base_worker, job): job["g"] for job in jobs}
+                for future in as_completed(futures):
+                    g, fs, ps = future.result()
+                    self._F_base_states[g] = fs
+                    self._P_base_states[g] = ps
+                    if verbose:
+                        print(f"[Base] dim {g+1}/{G} done")
+
+        return self
+
+    def predict_base(self, Z: np.ndarray) -> np.ndarray:
+        """
+        Predict E using the baseline NN (trained with fit_base).
+
+        Returns
+        -------
+        E_hat : (N,)    if E_source was 1-D
+                (N, G)  if E_source was 2-D
+        """
+        if not self._F_base_states:
+            raise RuntimeError("Call fit_base() before predict_base().")
+        Z = self._validate_Z(Z)
+        N = Z.shape[0]
+        Zt = torch.tensor(Z, dtype=torch.float32, device=DEVICE)
+
+        E_hat = np.zeros((N, self._G), dtype=np.float64)
+        for g in range(self._G):
+            F_net = FeatureExtractor(self.input_dim, self.hidden_dim_F, self.latent_dim).to(DEVICE)
+            P_net = Predictor(self.latent_dim, self.hidden_dim_DP, output_dim=1).to(DEVICE)
+            F_net.load_state_dict(self._F_base_states[g])
+            P_net.load_state_dict(self._P_base_states[g])
+            F_net.eval(); P_net.eval()
+            with torch.no_grad():
+                E_hat[:, g] = P_net(F_net(Zt)).view(-1).numpy()
+
+        if not self._multidim:
+            return E_hat[:, 0]
+        return E_hat
+
+    def mse_base(self, Z: np.ndarray, E_true: np.ndarray) -> float | np.ndarray:
+        """
+        MSE between baseline NN predictions and true E.
+
+        Returns
+        -------
+        float    if E_source was 1-D
+        (G,)     per-dimension MSE if E_source was 2-D
+        """
+        E_hat  = self.predict_base(Z)
+        E_true = np.asarray(E_true)
+        if not self._multidim:
+            return float(np.mean((E_hat - E_true.ravel()) ** 2))
+        return np.mean((E_hat - E_true) ** 2, axis=0)
 
     # ------------------------------------------------------------------
     # Internal helpers
