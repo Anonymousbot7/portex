@@ -1,6 +1,6 @@
 # portex
 
-Domain-Adversarial Neural Network (DANN) for cross-domain prediction of environmental factors **E** from genotype matrix **Z**.
+Domain-Adversarial Neural Network (DANN) for cross-domain prediction of environmental factors **E** from genotype matrix **Z**. 
 
 **Setup**: train on source domain (Z_source, E_source known), adapt to target domain (Z_target, E unknown), predict E on target.
 
