@@ -18,7 +18,7 @@ pip install git+https://github.com/Anonymousbot7/portex.git
 
 ```bash
 pip install git+https://github.com/Anonymousbot7/portex.git@main
-pip install git+https://github.com/Anonymousbot7/portex.git@v0.1.0
+pip install git+https://github.com/Anonymousbot7/portex.git@v0.2.0
 ```
 
 **Clone and install locally:**
@@ -96,14 +96,42 @@ Defaults match the original experimental settings exactly.
 
 ---
 
+## Baseline NN
+
+For comparison, `fit_base` trains the same F+P architecture on source data using MSE only — no domain adaptation. This serves as a direct baseline against DANN.
+
+```python
+model = DANN(input_dim=Z_source.shape[1])
+
+# Train both DANN and baseline on the same object
+model.fit(Z_source, E_source, Z_target)       # DANN
+model.fit_base(Z_source, E_source)            # baseline (no Z_target needed)
+
+E_dann = model.predict(Z_target)              # DANN predictions
+E_base = model.predict_base(Z_target)         # baseline predictions
+
+mse_dann = model.mse(Z_target, E_true)        # DANN MSE
+mse_base = model.mse_base(Z_target, E_true)   # baseline MSE
+```
+
+`fit_base` accepts an optional `epochs` argument (defaults to `self.epochs`) and supports `n_jobs` parallel training the same way as `fit`.
+
+---
+
 ## API Reference
 
 ```python
 model = DANN(input_dim, **kwargs)
 
+# DANN
 model.fit(Z_source, E_source, Z_target, verbose=False) -> self
 model.predict(Z)                                        -> (N,) or (N, G)
 model.mse(Z, E_true)                                   -> float or (G,) array
+
+# Baseline NN (MSE only, no domain adaptation)
+model.fit_base(Z_source, E_source, epochs=None, verbose=False) -> self
+model.predict_base(Z)                                           -> (N,) or (N, G)
+model.mse_base(Z, E_true)                                      -> float or (G,) array
 ```
 
 **`fit`**
@@ -111,10 +139,15 @@ model.mse(Z, E_true)                                   -> float or (G,) array
 - `E_source`: `(N_s,)` or `(N_s, G)` — source E values
 - `Z_target`: `(N_t, d)` — target genotypes (E not used in training)
 
-**`predict`**
+**`fit_base`**
+- `Z_source`, `E_source`: same as above
+- `epochs`: overrides `self.epochs` if provided; otherwise uses `self.epochs`
+- No `Z_target` needed
+
+**`predict` / `predict_base`**
 - Returns `(N,)` if `E_source` was 1-D, `(N, G)` if 2-D
 
-**`mse`**
+**`mse` / `mse_base`**
 - Returns `float` if E is 1-D, `(G,)` array of per-dimension MSE if 2-D
 
 ---
