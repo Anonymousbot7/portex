@@ -60,13 +60,7 @@ def _train_worker(kwargs: dict) -> tuple[int, dict, dict]:
     D_net = DomainDiscriminator(latent_dim, hidden_dim_DP).to(DEVICE)
     P_net = Predictor(latent_dim, hidden_dim_DP, output_dim=1).to(DEVICE)
 
-    # Automatically balance source (label=1) vs target (label=0) in the
-    # discriminator. pos_weight = N_target / N_source upweights the minority
-    # class; equals 1.0 when balanced, so there is no cost for balanced data.
-    pos_weight = torch.tensor(
-        [len(Z_target) / len(Z_source)], dtype=torch.float32, device=DEVICE
-    )
-    crit_dom = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    crit_dom = nn.BCEWithLogitsLoss()
     crit_reg = nn.MSELoss()
 
     opt_FD = torch.optim.Adam(
