@@ -113,7 +113,8 @@ def _train_worker(kwargs: dict) -> tuple[int, dict, dict]:
             print(
                 f"  [dim {g}] epoch {epoch+1}/{epochs}  "
                 f"task_mse={loss_task.item():.4f}  "
-                f"dom_loss={loss_dom.item():.4f}  "
+                f"disc_loss={loss_D.item():.4f}  "
+                f"adv_loss={loss_dom.item():.4f}  "
                 f"alpha={alpha:.3f}"
             )
 
